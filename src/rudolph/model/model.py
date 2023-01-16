@@ -206,6 +206,104 @@ class ruDolphModel(torch.nn.Module):
         if return_hidden_states:
             outputs += (hidden_states,)
         return outputs
+    
+    def forward_atari(
+        self,
+        input_ids,
+        attention_mask,
+        return_loss=False,
+        use_cache=False,
+        cache=None,
+        lt_loss_weight=1,
+        img_loss_weight=7,
+        rt_loss_weight=1,
+        return_hidden_states=False,
+    ):
+        device = input_ids.device
+        l_text = input_ids[:, :self.l_text_seq_length]
+        l_text_range = torch.arange(l_text.shape[1])
+        l_text_range += (self.vocab_size - self.l_text_seq_length)
+        l_text_range = l_text_range.to(device)
+        l_text = torch.where(l_text == 0, l_text_range, l_text)
+        l_text_pos = self.l_text_pos_embeddings(torch.arange(l_text.shape[1], device=device))
+        l_text_embeddings = self.text_embeddings(l_text) + l_text_pos
+
+        use_image = input_ids.shape[1] > self.l_text_seq_length
+        use_r_text = input_ids.shape[1] > self.l_text_seq_length + self.image_seq_length
+
+        embeddings = [l_text_embeddings]
+        if use_image:
+            image_input_ids = input_ids[:, self.l_text_seq_length:self.l_text_seq_length + self.image_seq_length]
+            img_pos = self.get_image_pos_embeddings(image_input_ids, past_length=0, device=device)
+            image_embeddings = self.image_embeddings(image_input_ids) + img_pos
+            embeddings.append(image_embeddings)
+
+        if use_r_text:
+            r_text = input_ids[:, self.l_text_seq_length + self.image_seq_length:]
+            r_text_pos = self.r_text_pos_embeddings(torch.arange(r_text.shape[1], device=device))
+            r_text_embeddings = self.text_embeddings(r_text) + r_text_pos
+            embeddings.append(r_text_embeddings)
+
+        embeddings = torch.cat(embeddings, dim=1)
+
+        alpha = 0.1
+        embeddings = embeddings * alpha + embeddings.detach() * (1 - alpha)
+
+        attention_mask = attention_mask[:, :, :embeddings.shape[1], :embeddings.shape[1]]
+        transformer_output, present_cache, hidden_states = self.transformer(
+            embeddings, attention_mask, cache=cache, use_cache=use_cache,
+            gradient_checkpointing=self.gradient_checkpointing
+        )
+
+        logits = self.to_logits(transformer_output)
+        if return_loss is False:
+            outputs = (logits, present_cache)
+            if return_hidden_states:
+                outputs += (hidden_states,)
+            return outputs
+
+        logits = rearrange(logits, 'b n c -> b c n')
+        l_text_logits = logits[
+            :, :self.vocab_size, :self.l_text_seq_length if use_image else self.l_text_seq_length-1
+        ].contiguous().float()
+        labels = [l_text[:, 1:]]
+        if use_image:
+            labels.append(image_input_ids)
+            a, b = self.l_text_seq_length, self.l_text_seq_length + self.image_seq_length - 1
+            image_logits = logits[:, self.vocab_size:, a:b].contiguous().float()
+        if use_r_text:
+            r_text_logits = logits[:, :self.vocab_size, -self.r_text_seq_length:-1].contiguous().float()
+            labels.append(r_text)
+        labels = torch.cat(labels, dim=1).contiguous().long()
+
+        loss, loss_weights, loss_values = 0, 0, {}
+        loss_l_text = F.cross_entropy(
+            l_text_logits,
+            labels[:, :self.l_text_seq_length]
+        )
+        loss_values['l_text_loss'] = loss_l_text.data.detach().float()
+
+        """
+        if False:#lt_loss_weight:
+        if False:#use_image:   
+        """
+        
+        if use_r_text:
+            loss_r_text = F.cross_entropy(
+                r_text_logits[:,:,1:2], ###########################
+                labels[:, -(self.r_text_seq_length-1):][:,1:2], ###
+                ignore_index=0,
+            )
+            loss_values['r_text_loss'] = loss_r_text.data.detach().float()
+            if rt_loss_weight:
+                loss += loss_r_text * rt_loss_weight
+                loss_weights += rt_loss_weight
+
+        loss = loss / loss_weights
+        outputs = (loss, loss_values)
+        if return_hidden_states:
+            outputs += (hidden_states,)
+        return outputs
 
     def to(self, device, *args, **kwargs):
         self.device = device
