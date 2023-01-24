@@ -10,7 +10,7 @@ import re
 
 def init_webdataset(storage_options, drop_duplicates=True):
     def get_bytes_io(path):
-        with fsspec.open(f"simplecache::{path}", s3=storage_options, mode='rb') as f:
+        with fsspec.open(path, s3=storage_options, mode='rb', skip_instance_cache=True) as f:
             byte_io = io.BytesIO(f.read())
         byte_io.seek(0)
         return byte_io
@@ -44,13 +44,10 @@ def init_webdataset(storage_options, drop_duplicates=True):
         for source in data:
             url = source["url"]
             try:
-
                 if storage_options is None:
                     df = pd.read_csv(tar2csv(url))
                 else:
                     df = pd.read_csv(tar2csv(url), storage_options=storage_options)
-
-                    
                 
                 if drop_duplicates:
                     df = df[~df['image_name'].duplicated()]

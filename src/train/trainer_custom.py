@@ -19,7 +19,6 @@ import pandas as pd
 
 from omegaconf import OmegaConf
 from src.rudolph.model import get_rudolph_model
-from src.inference.utils import create_dataset
 from src.inference.dataloader import DatasetRetriever
 from src.inference.inference import run_inference
 from torch.utils.data import DataLoader
@@ -58,6 +57,10 @@ from PIL import Image
 import io
 import torchvision.transforms as T
 from pytorch_lightning.trainer.supporters import CombinedLoader
+
+from src.inference.inference_api import ruDolphApi
+from tqdm import tqdm
+
 
 class ObjectWrapper(DataLoader):
     def __init__(self, baseObject, llen):
@@ -161,20 +164,26 @@ class RudolphLightning(pl.LightningModule):
         
         print('############################################INIT DONE')
         
+        self.tasks = [   '/home/jovyan/Aleksei_RL/fb_train_2022/vqa/vqa_val.json',
+                         '/home/jovyan/Aleksei_RL/fb_train_2022/textqa/text_small_val.json']
+        self.if_breakout = False
+        self.if_pong = False
+        
+        
         
     def preprocess_s3_frame(self, item):
     
         left_special_token = '<LT_RLA>'
         right_special_token = '<RT_RLA>'
 
-        lt = torch.zeros(self.conf.model.params.l_text_seq_length,dtype=torch.int32)#.to(api.device)
+        lt = torch.zeros(self.conf.model.params.l_text_seq_length,dtype=torch.int32)
         lt[0] = 2
         lt[1] = DEFAULT_SPC_TOKENS[left_special_token]
         lt[2] = 3
 
         img = Image.open(io.BytesIO(item['data']))  
         img = self.image_transform(img)
-        rt = torch.zeros(self.conf.model.params.r_text_seq_length,dtype=torch.int32)#.to(api.device)
+        rt = torch.zeros(self.conf.model.params.r_text_seq_length,dtype=torch.int32)
         rt[0] = 2
         rt[1] = DEFAULT_SPC_TOKENS[right_special_token]
         rt[2] = DEFAULT_SPC_TOKENS['ATARI_{}'.format(item['action'])]
@@ -276,6 +285,68 @@ class RudolphLightning(pl.LightningModule):
 
         return has_fire_action, lives
     
+    def get_vqa_textqa_score(self):
+
+        vocab = self.tokenizer.tokenizer.vocab()
+        allowed_token_ids = []
+        for i, token in enumerate(vocab):
+            allowed_token_ids.append(i)
+        ignore_ids = [self.tokenizer.eos_id, self.tokenizer.bos_id, self.tokenizer.unk_id, self.tokenizer.pad_id, -1, *list(DEFAULT_SPC_TOKENS.values())]        
+        
+        vocab_size = self.model.get_param('vocab_size')
+        image_tokens_per_dim = self.model.get_param('image_tokens_per_dim')
+        l_text_seq_length = self.model.get_param('l_text_seq_length')
+        r_text_seq_length = self.model.get_param('r_text_seq_length')
+        image_seq_length = self.model.get_param('image_seq_length')
+        device = self.model.get_param('device')
+        spc_id = -1
+        api = ruDolphApi(self.model, self.tokenizer, self.vae, bs=10)
+        
+        for task in self.tasks:
+            task_name = task.split('/')[5]
+            dataset = self.df_val[self.df_val['task_id']==task_name].sample(n = 10)
+            
+            test_dataset = DatasetRetriever(
+                            task_ids = dataset['task_id'].values,
+                            left_texts = dataset['left_text'].values,
+                            image_paths = dataset['image_path'].values,
+                            right_texts = dataset['right_text'].values,
+                            stage='val',
+                            tokenizer=self.tokenizer,
+                            model_params = self.conf.model.params)
+            test_dataloader = DataLoader(
+                        test_dataset,
+                        batch_size=10,
+                        shuffle=False,
+                        pin_memory=False,
+                        drop_last=False,
+                        num_workers=1)
+                
+            for batch in tqdm(test_dataloader):
+                task_id, left_text, images, right_text = batch
+                left_text = batch['left_text'].to(device)
+                images = batch['image'].to(device)
+                right_text = batch['right_text'].to(device)
+                image_tokens = self.vae.get_codebook_indices(images).to(device)    
+                
+            texts = api.generate_tokens(image_tokens, left_text, vocab_size, 
+                                    top_k=32, top_p=0.8, temperature=1.0, template = '', 
+                                    allowed_token_ids = allowed_token_ids, special_token='<RT_UNK>') 
+            
+            if task_name=='vqa':
+                true_json = {str(ii):[{'type':'text','content':[i]}] for ii,i in enumerate(self.tokenizer.tokenizer.decode(right_text.cpu().numpy().tolist(), ignore_ids=ignore_ids))}
+                pred_json = {str(ii):[{'type':'text','content':i}] for ii,i in enumerate(texts)}
+                meteor = calc_meteor(true_json, pred_json)
+                
+            if task_name=='textqa':
+                true_json = {str(ii):[{'type':'text','content':[i]}] for ii,i in enumerate(self.tokenizer.tokenizer.decode(right_text.cpu().numpy().tolist(), ignore_ids=ignore_ids))}
+                pred_json = {str(ii):[{'type':'text','content':i}] for ii,i in enumerate(texts)}
+                f1 = get_f1(true_json, pred_json)
+                
+        return meteor, f1        
+                
+                    
+    
     def get_atari_reward(self,env):
         observation = env.reset()
         should_fire, lives = self.check_atari_env(env)
@@ -307,56 +378,54 @@ class RudolphLightning(pl.LightningModule):
         return np.mean(sum_rewards)
     
     def test_model(self):
-        BREAKOUT_REWARD = self.get_atari_reward(self.eval_env_breakout)
-        print({'Breakout_reward': BREAKOUT_REWARD})
-        self.log('Breakout_reward',BREAKOUT_REWARD, prog_bar=True, logger=True)
         
-        PONG_REWARD = self.get_atari_reward(self.eval_env_pong)
-        print({'Pong_reward': PONG_REWARD})
-        self.log('Pong_reward',PONG_REWARD, prog_bar=True, logger=True)
+        if self.if_breakout: 
+            BREAKOUT_REWARD = self.get_atari_reward(self.eval_env_breakout)
+            print({'Breakout_reward': BREAKOUT_REWARD})
+            self.log('Breakout_reward',BREAKOUT_REWARD, prog_bar=True, logger=True)
+        
+        if self.if_pong: 
+            PONG_REWARD = self.get_atari_reward(self.eval_env_pong)
+            print({'Pong_reward': PONG_REWARD})
+            self.log('Pong_reward',PONG_REWARD, prog_bar=True, logger=True)
+        
+        VQA_SCORE, TEXTQA_SCORE = self.get_vqa_textqa_score()
+        print({'Vqa_score': VQA_SCORE})
+        self.log('Vqa_score',VQA_SCORE, prog_bar=True, logger=True)
+        print({'Textqa_score': TEXTQA_SCORE})
+        self.log('Textqa_score',TEXTQA_SCORE, prog_bar=True, logger=True)
+    
     
     def model_step(self, batch, batch_idx, stage):
-        
-        if stage=='train':
-            fbc_dataset = batch[0]
-            atari_dataset1 = batch[1]
-            atari_dataset2 = batch[2]
-            if batch_idx % 200 == 0:
-                self.test_model()
-        if stage=='valid':
-            fbc_dataset = batch 
-            print(fbc_dataset[0][:,1])
         
         losses = []
         
         if stage=='train':
-            ## ATARI LOSS
-            if atari_dataset1[0].shape[0]>0:
-                left_text_atari = atari_dataset1[0]
-                image_atari = atari_dataset1[1]
-                right_text_atari = atari_dataset1[2]
-                bs_tr = left_text_atari.shape[0]
-
-                loss_atari = self.atari_loss(bs_tr, left_text_atari, image_atari, right_text_atari, self.task_weights.atari)
-                self.log(f"{stage}_loss_atari_breakout", loss_atari, prog_bar=True, logger=True, batch_size=bs_tr)
-                losses.append((self.task_weights.atari_loss_weight)*loss_atari)
+            fbc_dataset = batch[0]
+            atari_dataset1 = batch[1]
+            
+            left_text_atari = atari_dataset1[0]
+            image_atari = atari_dataset1[1]
+            right_text_atari = atari_dataset1[2]
+            bs_tr = left_text_atari.shape[0]
+            
+            loss_atari = self.atari_loss(bs_tr, left_text_atari, image_atari, right_text_atari, self.task_weights.atari)
+            self.log(f"{stage}_loss_atari", loss_atari, prog_bar=True, logger=True, batch_size=bs_tr)
+            losses.append((self.task_weights.atari_loss_weight)*loss_atari)
+            
+            
+            if batch_idx % 200 == 0:
+                self.test_model()
                 
-            if atari_dataset2[0].shape[0]>0:
-                left_text_atari = atari_dataset2[0]
-                image_atari = atari_dataset2[1]
-                right_text_atari = atari_dataset2[2]
-                bs_tr = left_text_atari.shape[0]
-
-                loss_atari = self.atari_loss(bs_tr, left_text_atari, image_atari, right_text_atari, self.task_weights.atari)
-                self.log(f"{stage}_loss_atari_pong", loss_atari, prog_bar=True, logger=True, batch_size=bs_tr)
-                losses.append((self.task_weights.atari_loss_weight)*loss_atari)    
+        if stage=='valid':
+            fbc_dataset = batch # [0] 
+        
 
         ## text_qa
         if any(fbc_dataset[0][:,1]==16390):
             indices = torch.nonzero(fbc_dataset[0][:,1]==16390).flatten()
             left_text_t = fbc_dataset[0][indices,:]
             right_text_t = fbc_dataset[2][indices,:]
-            
             bs_text = left_text_t.shape[0]
             loss_text = self.get_loss(bs_text, left_text_t, None, right_text_t, self.task_weights.text)
             self.log(f"{stage}_loss_text", loss_text, prog_bar=True, logger=True, batch_size=bs_text)
@@ -367,8 +436,6 @@ class RudolphLightning(pl.LightningModule):
             indices = torch.nonzero(fbc_dataset[0][:,1]==16392).flatten()
             left_text_m = fbc_dataset[0][indices,:]
             right_text_m = fbc_dataset[2][indices,:]
-            
-            
             bs_math = left_text_m.shape[0]
             loss_math = self.get_loss(bs_math, left_text_m, None, right_text_m, self.task_weights.math)
             self.log(f"{stage}_loss_math", loss_math, prog_bar=True, logger=True, batch_size=bs_math)
@@ -380,8 +447,6 @@ class RudolphLightning(pl.LightningModule):
             left_text_c = fbc_dataset[0][indices,:]
             image_c = fbc_dataset[1][indices,:]
             right_text_c = fbc_dataset[2][indices,:]
-            
-            
             bs_c = left_text_c.shape[0]
             loss_с = self.get_loss(bs_c, left_text_c, image_c, right_text_c, self.task_weights.capt)
             self.log(f"{stage}_loss_с", loss_с, prog_bar=True, logger=True, batch_size=bs_c)
@@ -392,7 +457,6 @@ class RudolphLightning(pl.LightningModule):
             indices = torch.nonzero(fbc_dataset[0][:,1]==16398).flatten()
             left_text_g = fbc_dataset[0][indices,:]
             image_g = fbc_dataset[1][indices,:]           
-            
             bs_g = left_text_g.shape[0]
             loss_g = self.get_loss(bs_g, left_text_g, image_g, None, self.task_weights.gener)
             self.log(f"{stage}_loss_g", loss_g, prog_bar=True, logger=True, batch_size=bs_g)
@@ -404,8 +468,6 @@ class RudolphLightning(pl.LightningModule):
             left_text_vqa = fbc_dataset[0][indices,:]
             image_vqa = fbc_dataset[1][indices,:]
             right_text_vqa = fbc_dataset[2][indices,:]
-            
-            
             bs_vqa = left_text_vqa.shape[0]
             loss_vqa = self.get_loss(bs_vqa, left_text_vqa, image_vqa, right_text_vqa, self.task_weights.vqa)
             self.log(f"{stage}_loss_vqa", loss_vqa, prog_bar=True, logger=True, batch_size=bs_vqa)
@@ -417,8 +479,6 @@ class RudolphLightning(pl.LightningModule):
             left_text_tr = fbc_dataset[0][indices,:]
             image_tr = fbc_dataset[1][indices,:]
             right_text_tr = fbc_dataset[2][indices,:]
-            
-            
             bs_tr = left_text_tr.shape[0]
             loss_tr = self.get_loss(bs_tr, left_text_tr, image_tr, right_text_tr, self.task_weights.text_recog)
             self.log(f"{stage}_loss_tr", loss_tr, prog_bar=True, logger=True, batch_size=bs_tr)
@@ -431,8 +491,6 @@ class RudolphLightning(pl.LightningModule):
             left_text_tr = fbc_dataset[0][indices,:]
             image_tr = fbc_dataset[1][indices,:]
             right_text_tr = fbc_dataset[2][indices,:]
-            
-            
             bs_tr = left_text_tr.shape[0]
             loss_tr = self.get_loss(bs_tr, left_text_tr, image_tr, right_text_tr, self.task_weights.text_recog)
             self.log(f"{stage}_loss_tr", loss_tr, prog_bar=True, logger=True, batch_size=bs_tr)
@@ -441,16 +499,16 @@ class RudolphLightning(pl.LightningModule):
         
         ## join loss
         loss = sum(losses)
-        #print('############## Before', loss, fbc_dataset[0][:,1])
         self.log(f"{stage}_loss", loss, prog_bar=True, logger=True, batch_size=self.bs)
         return {"loss": loss}
+    
     
     def training_step(self, batch, batch_idx):
         print('TRAIN', len(batch),batch_idx)
         return self.model_step(batch, batch_idx, 'train')
         
-    def validation_step(self, batch, batch_idx, dataset_idx):
-        print('VAL', len(batch),batch_idx,dataset_idx)
+    def validation_step(self, batch, batch_idx): #dataset_idx
+        print('VAL', len(batch),batch_idx) #dataset_idx
         return self.model_step(batch, batch_idx, 'valid')
 
     def configure_optimizers(self):
@@ -483,7 +541,7 @@ class RudolphLightning(pl.LightningModule):
 
         std_train_dataloader = DataLoader(
             train_dataset,
-            batch_size=self.conf.trainer.bs,
+            batch_size=self.conf.trainer.bs, #10
             sampler=train_sampler,
             pin_memory=False,
             drop_last=False,
@@ -491,46 +549,36 @@ class RudolphLightning(pl.LightningModule):
             collate_fn=fb_collate_fn)
   
         
-        
-        game = 'Breakout'
-        urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
-        
-        
-        s3_dataset_breakout = wds.WebDataset(
+        if torch.distributed.get_rank() == 0:
+            print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ INIT BREAKOUT @@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+            game = 'Breakout'
+            urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
+            self.if_breakout = True
+            
+        if torch.distributed.get_rank() == 1:
+            print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ INIT PONG @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+            game = 'Pong'
+            urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
+            self.if_pong = True
+            
+        s3_dataset_atari = wds.WebDataset(
             urls, 
-            handler=wds.warn_and_continue, nodesplitter=my_node_splitter, shardshuffle=True).shuffle(10000)
-        s3_dataset_breakout = s3_dataset_breakout.map(self.preprocess_s3_frame)
-        
-        s3_train_dataloader_breakout = DataLoader(
-            s3_dataset_breakout,
-            batch_size= 24,#self.conf.trainer.bs,
+            handler=wds.warn_and_continue, nodesplitter=lambda x: x).shuffle(10000)
+        s3_dataset_atari = s3_dataset_atari.map(self.preprocess_s3_frame)
+        s3_train_dataloader_atari = DataLoader(
+            s3_dataset_atari,
+            batch_size= self.conf.trainer.atari_bs, #24
             pin_memory=False,
             drop_last=False,
             num_workers=self.NUM_WORKERS,
             collate_fn=fb_collate_fn)
+        ss3_train_dataloader_atari = ObjectWrapper(s3_train_dataloader_atari,30000)
         
-        ss3_train_dataloader_breakout = ObjectWrapper(s3_train_dataloader_breakout,30000)
-        
-        game = 'Pong'
-        urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
-        s3_dataset_pong = wds.WebDataset(
-            urls, 
-            handler=wds.warn_and_continue, nodesplitter=my_node_splitter, shardshuffle=True).shuffle(10000)
-        s3_dataset_pong = s3_dataset_pong.map(self.preprocess_s3_frame)
-        s3_train_dataloader_pong = DataLoader(
-            s3_dataset_pong,
-            batch_size= 24,#self.conf.trainer.bs,
-            pin_memory=False,
-            drop_last=False,
-            num_workers=self.NUM_WORKERS,
-            collate_fn=fb_collate_fn)
-        ss3_train_dataloader_pong = ObjectWrapper(s3_train_dataloader_pong,30000)
-        
-        loaders = [std_train_dataloader, ss3_train_dataloader_breakout, ss3_train_dataloader_pong]
+        loaders = [std_train_dataloader, ss3_train_dataloader_atari]
 
         return loaders
 
-    """
+
     def val_dataloader(self):
         val_dataset = DatasetRetriever(
             task_ids=self.df_val['task_id'].values,
@@ -557,41 +605,10 @@ class RudolphLightning(pl.LightningModule):
             num_workers=self.NUM_WORKERS,
             collate_fn=fb_collate_fn)     
   
-        
-        game = 'Breakout'
-        urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
-        s3_dataset_breakout = wds.WebDataset(
-            urls, 
-            handler=wds.warn_and_continue, nodesplitter=my_split_by_node).shuffle(10000)
-        s3_dataset_breakout = s3_dataset_breakout.map(self.preprocess_s3_frame)
-        s3_val_dataloader_breakout = DataLoader(
-            s3_dataset_breakout,
-            batch_size= 2,#self.conf.trainer.bs,
-            pin_memory=False,
-            drop_last=False,
-            num_workers=self.NUM_WORKERS,
-            collate_fn=fb_collate_fn)
-        ss3_val_dataloader_breakout = ObjectWrapper(s3_val_dataloader_breakout,30000)
-        
-        game = 'Pong'
-        urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
-        s3_dataset_pong = wds.WebDataset(
-            urls, 
-            handler=wds.warn_and_continue, nodesplitter=my_split_by_node).shuffle(10000)
-        s3_dataset_pong = s3_dataset_pong.map(self.preprocess_s3_frame)
-        s3_val_dataloader_pong = DataLoader(
-            s3_dataset_pong,
-            batch_size= 2,#self.conf.trainer.bs,
-            pin_memory=False,
-            drop_last=False,
-            num_workers=self.NUM_WORKERS,
-            collate_fn=fb_collate_fn)
-        ss3_val_dataloader_pong = ObjectWrapper(s3_val_dataloader_pong,30000)
-        
-        loaders = [std_val_dataloader, ss3_val_dataloader_breakout, ss3_val_dataloader_pong]
+        loaders = [std_val_dataloader]
         
         return loaders
-    """    
+  
 
     
 def freeze(

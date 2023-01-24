@@ -1,0 +1,6 @@
+pandas
+numpy
+pillow
+fsspec>=2023.1.0
+s3fs
+webdataset

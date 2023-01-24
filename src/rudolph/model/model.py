@@ -192,15 +192,15 @@ class ruDolphModel(torch.nn.Module):
                 loss_weights += img_loss_weight
         if use_r_text:
             loss_r_text = F.cross_entropy(
-                r_text_logits,
-                labels[:, -(self.r_text_seq_length-1):],
+                r_text_logits, ###########################
+                labels[:, -(self.r_text_seq_length-1):], ###
                 ignore_index=0,
             )
             loss_values['r_text_loss'] = loss_r_text.data.detach().float()
             if rt_loss_weight:
                 loss += loss_r_text * rt_loss_weight
-                loss_weights += rt_loss_weight
-
+                loss_weights += rt_loss_weight   
+                
         loss = loss / loss_weights
         outputs = (loss, loss_values)
         if return_hidden_states:
@@ -267,11 +267,11 @@ class ruDolphModel(torch.nn.Module):
             :, :self.vocab_size, :self.l_text_seq_length if use_image else self.l_text_seq_length-1
         ].contiguous().float()
         labels = [l_text[:, 1:]]
-        if use_image:
+        if use_image: 
             labels.append(image_input_ids)
             a, b = self.l_text_seq_length, self.l_text_seq_length + self.image_seq_length - 1
             image_logits = logits[:, self.vocab_size:, a:b].contiguous().float()
-        if use_r_text:
+        if use_r_text: 
             r_text_logits = logits[:, :self.vocab_size, -self.r_text_seq_length:-1].contiguous().float()
             labels.append(r_text)
         labels = torch.cat(labels, dim=1).contiguous().long()
