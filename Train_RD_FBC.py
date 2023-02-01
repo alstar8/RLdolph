@@ -1,11 +1,11 @@
 import os
 import sys
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 os.environ['WANDB_MODE'] = 'online'
 os.environ['WANDB_API_KEY'] = '77b33f530c461728a2fb12eeb694e04811d2d960'
 
-sys.path.insert(0, '../inference')
+sys.path.insert(0, '../COMMON_PATH/data_for_inference')
 
 from rudalle import get_tokenizer, get_vae
 from src.inference.utils import create_dataset
@@ -52,7 +52,7 @@ def main():
     parser.add_argument('--config', default='config/fusion_train.yaml',type=str, help='config path')
     args = parser.parse_args(''.split())
     conf_origin = OmegaConf.load(args.config)
-    conf_origin.trainer.pl_trainer.gpus = 1
+    conf_origin.trainer.pl_trainer.gpus = 4
     conf_origin.trainer.pl_trainer.strategy = 'ddp'
     del conf_origin.trainer.pl_trainer.progress_bar_refresh_rate
     

@@ -178,10 +178,10 @@ class ruDolphModel(torch.nn.Module):
             labels[:, :self.l_text_seq_length]
         )
         loss_values['l_text_loss'] = loss_l_text.data.detach().float()
-        if lt_loss_weight:
+        if lt_loss_weight:    # lt_loss_weight
             loss += loss_l_text*lt_loss_weight
             loss_weights += lt_loss_weight
-        if use_image:
+        if False:         # use_image
             loss_img = F.cross_entropy(
                 image_logits,
                 labels[:, self.l_text_seq_length:self.l_text_seq_length + self.image_seq_length - 1]
@@ -191,9 +191,10 @@ class ruDolphModel(torch.nn.Module):
                 loss += loss_img*img_loss_weight
                 loss_weights += img_loss_weight
         if use_r_text:
+
             loss_r_text = F.cross_entropy(
-                r_text_logits, ###########################
-                labels[:, -(self.r_text_seq_length-1):], ###
+                r_text_logits[:,:,1:2], ########################### [:,:,1:2]
+                labels[:, -(self.r_text_seq_length-1):][:,1:2], ### [:,1:2]
                 ignore_index=0,
             )
             loss_values['r_text_loss'] = loss_r_text.data.detach().float()
@@ -283,15 +284,23 @@ class ruDolphModel(torch.nn.Module):
         )
         loss_values['l_text_loss'] = loss_l_text.data.detach().float()
 
-        """
-        if False:#lt_loss_weight:
-        if False:#use_image:   
-        """
+        if False:    # lt_loss_weight
+            loss += loss_l_text*lt_loss_weight
+            loss_weights += lt_loss_weight
+        if False:         # use_image
+            loss_img = F.cross_entropy(
+                image_logits,
+                labels[:, self.l_text_seq_length:self.l_text_seq_length + self.image_seq_length - 1]
+            )
+            loss_values['image_loss'] = loss_img.data.detach().float()
+            if img_loss_weight:
+                loss += loss_img*img_loss_weight
+                loss_weights += img_loss_weight
         
         if use_r_text:
             loss_r_text = F.cross_entropy(
-                r_text_logits[:,:,1:2], ###########################
-                labels[:, -(self.r_text_seq_length-1):][:,1:2], ###
+                r_text_logits[:,:,1:2], ########################### [:,:,1:2]
+                labels[:, -(self.r_text_seq_length-1):][:,1:2], ### [:,1:2]
                 ignore_index=0,
             )
             loss_values['r_text_loss'] = loss_r_text.data.detach().float()

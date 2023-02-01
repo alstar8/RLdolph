@@ -26,19 +26,19 @@ from torch.utils.data import DataLoader
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 import nltk
 import wordtodigits as w2d
-from data_for_inference.vqa_metrics import calc_meteor
+from vqa_metrics import calc_meteor
 import json
 # Generation
 import os
 import torch
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from data_for_inference.generation_metrics.fid import calculate_fid_given_paths
-from data_for_inference.generation_metrics.inception import InceptionV3
-from data_for_inference.generation_metrics.ruclip import calc_ruclip_metric
+from generation_metrics.fid import calculate_fid_given_paths
+from generation_metrics.inception import InceptionV3
+from generation_metrics.ruclip import calc_ruclip_metric
 import json
 # TextQA
 import argparse
-from data_for_inference.textqa_metrics.calculate_f1 import get_f1
+from textqa_metrics.calculate_f1 import get_f1
 import json
 def read_json(file_name):
     with open(file_name) as f:
@@ -401,7 +401,7 @@ class RudolphLightning(pl.LightningModule):
         losses = []
         
         if stage=='train':
-            fbc_dataset = batch[0]
+            #fbc_dataset = batch[0]
             atari_dataset1 = batch[1]
             
             left_text_atari = atari_dataset1[0]
@@ -419,8 +419,8 @@ class RudolphLightning(pl.LightningModule):
                 
         if stage=='valid':
             fbc_dataset = batch # [0] 
-        
 
+        """    
         ## text_qa
         if any(fbc_dataset[0][:,1]==16390):
             indices = torch.nonzero(fbc_dataset[0][:,1]==16390).flatten()
@@ -495,7 +495,7 @@ class RudolphLightning(pl.LightningModule):
             loss_tr = self.get_loss(bs_tr, left_text_tr, image_tr, right_text_tr, self.task_weights.text_recog)
             self.log(f"{stage}_loss_tr", loss_tr, prog_bar=True, logger=True, batch_size=bs_tr)
             losses.append((self.task_weights.text_recog_loss_weight/4.)*loss_tr)    
-
+        """
         
         ## join loss
         loss = sum(losses)
@@ -549,17 +549,19 @@ class RudolphLightning(pl.LightningModule):
             collate_fn=fb_collate_fn)
   
         
-        if torch.distributed.get_rank() == 0:
-            print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ INIT BREAKOUT @@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
-            game = 'Breakout'
-            urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
-            self.if_breakout = True
+        #if torch.distributed.get_rank() == 0:
+        print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ INIT BREAKOUT @@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+        game = 'Breakout'
+        urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,450)]
+        self.if_breakout = True
             
+        """    
         if torch.distributed.get_rank() == 1:
             print('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ INIT PONG @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
             game = 'Pong'
             urls = ['s3://officecds-bucket01/datasets_v3/rl_atari_dataset/atari_{}/atari_{}_tr_{}.tar'.format(game.lower(),game.lower(),str(10000+i)[1:]) for i in range(1,500)]
             self.if_pong = True
+        """    
             
         s3_dataset_atari = wds.WebDataset(
             urls, 
@@ -574,7 +576,7 @@ class RudolphLightning(pl.LightningModule):
             collate_fn=fb_collate_fn)
         ss3_train_dataloader_atari = ObjectWrapper(s3_train_dataloader_atari,30000)
         
-        loaders = [std_train_dataloader, ss3_train_dataloader_atari]
+        loaders = [std_train_dataloader, ss3_train_dataloader_atari] #std_train_dataloader
 
         return loaders
 

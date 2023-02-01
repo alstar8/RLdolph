@@ -80,16 +80,16 @@ model:
     mlp_activation: "gelu_jit"
 
 trainer:
-  bs: 10
-  atari_bs: 32
+  bs: 2
+  atari_bs: 24
   task_weights:
-    text_loss_weight: 0.5
-    math_loss_weight: 0.5
-    gener_loss_weight: 0.5
-    capt_loss_weight: 0.5
-    vqa_loss_weight: 0.5
-    text_recog_loss_weight: 0.5
-    atari_loss_weight: 1.0
+    text_loss_weight:        .1
+    math_loss_weight:        .1
+    gener_loss_weight:       .1
+    capt_loss_weight:        .1
+    vqa_loss_weight:         .1
+    text_recog_loss_weight:  .1
+    atari_loss_weight:               1.0
     text:
         lt_loss_weight: 1
         img_loss_weight: 0.01
@@ -115,8 +115,8 @@ trainer:
         img_loss_weight: 1
         rt_loss_weight: 7
     atari:
-        lt_loss_weight: 0.0
-        img_loss_weight: 0.0
+        lt_loss_weight: 0.01
+        img_loss_weight: 0.01
         rt_loss_weight: 7    
         
   scheduler:
